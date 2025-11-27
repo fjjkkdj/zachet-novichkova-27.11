@@ -1,0 +1,206 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Linq;
+using System.Threading.Tasks;
+
+public class Observable<T>
+{
+    private readonly List<Action<T>> _subscribers = new();
+    private T _currentValue;
+    private readonly object _lock = new object();
+
+    public IDisposable Subscribe(Action<T> onNext)
+    {
+        lock (_lock)
+        {
+            _subscribers.Add(onNext);
+        }
+        return new Unsubscriber(() => Unsubscribe(onNext));
+    }
+
+    private void Unsubscribe(Action<T> subscriber)
+    {
+        lock (_lock)
+        {
+            _subscribers.Remove(subscriber);
+        }
+    }
+
+    public void OnNext(T value)
+    {
+        List<Action<T>> subscribersCopy;
+        lock (_lock)
+        {
+            subscribersCopy = new List<Action<T>>(_subscribers);
+        }
+
+        _currentValue = value;
+        foreach (var subscriber in subscribersCopy)
+        {
+            subscriber(value);
+        }
+    }
+
+    public Observable<R> Select<R>(Func<T, R> selector)
+    {
+        var result = new Observable<R>();
+        Subscribe(value => result.OnNext(selector(value)));
+        return result;
+    }
+
+    public Observable<T> Where(Func<T, bool> predicate)
+    {
+        var result = new Observable<T>();
+        Subscribe(value => { if (predicate(value)) result.OnNext(value); });
+        return result;
+    }
+
+    public Observable<T> Throttle(TimeSpan interval)
+    {
+        var result = new Observable<T>();
+        DateTime lastCall = DateTime.MinValue;
+        
+        Subscribe(value =>
+        {
+            var now = DateTime.Now;
+            if (now - lastCall >= interval)
+            {
+                lastCall = now;
+                result.OnNext(value);
+            }
+        });
+        
+        return result;
+    }
+
+    public Observable<T> Distinct()
+    {
+        var result = new Observable<T>();
+        T lastValue = default;
+        bool hasValue = false;
+        
+        Subscribe(value =>
+        {
+            if (!hasValue || !EqualityComparer<T>.Default.Equals(lastValue, value))
+            {
+                hasValue = true;
+                lastValue = value;
+                result.OnNext(value);
+            }
+        });
+        
+        return result;
+    }
+
+    private class Unsubscriber : IDisposable
+    {
+        private readonly Action _unsubscribe;
+        public Unsubscriber(Action unsubscribe) => _unsubscribe = unsubscribe;
+        public void Dispose() => _unsubscribe?.Invoke();
+    }
+}
+
+public class ObservableProperty<T> : INotifyPropertyChanged
+{
+    private T _value;
+    
+    public T Value
+    {
+        get => _value;
+        set
+        {
+            if (!EqualityComparer<T>.Default.Equals(_value, value))
+            {
+                _value = value;
+                OnPropertyChanged(nameof(Value));
+                PropertyChangedObservable.OnNext(value);
+            }
+        }
+    }
+
+    public Observable<T> PropertyChangedObservable { get; } = new Observable<T>();
+
+    public event PropertyChangedEventHandler PropertyChanged;
+
+    protected virtual void OnPropertyChanged(string propertyName)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+}
+
+class Program
+{
+    static async Task Main()
+    {
+        var observableProperty = new ObservableProperty<int>();
+        var random = new Random();
+
+        Console.WriteLine("=== Raw Property Changes ===");
+        using var subscription1 = observableProperty.PropertyChangedObservable
+            .Subscribe(value => Console.WriteLine($"Property changed: {value}"));
+
+        for (int i = 0; i < 20; i++)
+        {
+            observableProperty.Value = random.Next(0, 10);
+            await Task.Delay(50);
+        }
+
+        Console.WriteLine("\n=== Filtered (Even numbers only) ===");
+        using var subscription2 = observableProperty.PropertyChangedObservable
+            .Where(x => x % 2 == 0)
+            .Subscribe(value => Console.WriteLine($"Even: {value}"));
+
+        for (int i = 0; i < 20; i++)
+        {
+            observableProperty.Value = random.Next(0, 10);
+            await Task.Delay(50);
+        }
+
+        Console.WriteLine("\n=== Transformed (Value * 2) ===");
+        using var subscription3 = observableProperty.PropertyChangedObservable
+            .Select(x => x * 2)
+            .Subscribe(value => Console.WriteLine($"Doubled: {value}"));
+
+        for (int i = 0; i < 20; i++)
+        {
+            observableProperty.Value = random.Next(0, 10);
+            await Task.Delay(50);
+        }
+
+        Console.WriteLine("\n=== Throttled (Max 1 per 200ms) ===");
+        using var subscription4 = observableProperty.PropertyChangedObservable
+            .Throttle(TimeSpan.FromMilliseconds(200))
+            .Subscribe(value => Console.WriteLine($"Throttled: {value}"));
+
+        for (int i = 0; i < 50; i++)
+        {
+            observableProperty.Value = random.Next(0, 5);
+            await Task.Delay(50);
+        }
+
+        Console.WriteLine("\n=== Distinct Values Only ===");
+        using var subscription5 = observableProperty.PropertyChangedObservable
+            .Distinct()
+            .Subscribe(value => Console.WriteLine($"Distinct: {value}"));
+
+        for (int i = 0; i < 30; i++)
+        {
+            observableProperty.Value = random.Next(0, 5);
+            await Task.Delay(30);
+        }
+
+        Console.WriteLine("\n=== Combined Operations ===");
+        using var subscription6 = observableProperty.PropertyChangedObservable
+            .Where(x => x > 2)
+            .Select(x => $"Mapped: {x * 10}")
+            .Throttle(TimeSpan.FromMilliseconds(100))
+            .Subscribe(value => Console.WriteLine(value));
+
+        for (int i = 0; i < 50; i++)
+        {
+            observableProperty.Value = random.Next(0, 10);
+            await Task.Delay(50);
+        }
+    }
+}
