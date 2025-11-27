@@ -1,0 +1,182 @@
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+public class Request
+{
+    public string Path { get; set; }
+    public string Method { get; set; }
+    public Dictionary<string, string> Headers { get; set; } = new();
+    public string Body { get; set; }
+    public string User { get; set; }
+    public string Token { get; set; }
+    public string Role { get; set; }
+    public DateTime Timestamp { get; set; } = DateTime.Now;
+}
+
+public class Response
+{
+    public int StatusCode { get; set; }
+    public string Body { get; set; }
+    public Dictionary<string, string> Headers { get; set; } = new();
+    public bool IsCompleted { get; set; }
+}
+
+public class RequestPipeline
+{
+    private readonly List<Func<Request, Response, Func<Task<Response>>, Task<Response>>> _handlers = new();
+
+    public RequestPipeline Use(Func<Request, Response, Func<Task<Response>>, Task<Response>> handler)
+    {
+        _handlers.Add(handler);
+        return this;
+    }
+
+    public async Task<Response> ExecuteAsync(Request request)
+    {
+        var response = new Response();
+
+        Func<Task<Response>> next = () => Task.FromResult(response);
+        
+        for (int i = _handlers.Count - 1; i >= 0; i--)
+        {
+            var currentNext = next;
+            var currentHandler = _handlers[i];
+            next = () => currentHandler(request, response, currentNext);
+        }
+
+        return await next();
+    }
+}
+
+class Program
+{
+    private static int _requestCount = 0;
+    private static readonly Dictionary<string, Response> _cache = new();
+
+    static async Task Main()
+    {
+        var pipeline1 = new RequestPipeline();
+        var pipeline2 = new RequestPipeline();
+
+        pipeline1
+            .Use(LoggingHandler)
+            .Use(ValidationHandler)
+            .Use(RateLimitHandler)
+            .Use(AuthenticationHandler)
+            .Use(AuthorizationHandler)
+            .Use(CacheHandler)
+            .Use(ProcessingHandler);
+
+        pipeline2
+            .Use(AuthenticationHandler)
+            .Use(ValidationHandler)
+            .Use(CacheHandler)
+            .Use(ProcessingHandler)
+            .Use(LoggingHandler);
+
+        var requests = new[]
+        {
+            new Request { Path = "/api/data", Method = "GET", Token = "valid_token", Role = "user" },
+            new Request { Path = "/api/admin", Method = "POST", Token = "valid_token", Role = "admin" },
+            new Request { Path = "/api/user", Method = "GET", Token = "invalid_token" },
+            new Request { Path = "", Method = "GET", Token = "valid_token" },
+            new Request { Path = "/api/data", Method = "GET", Token = "valid_token", Role = "user" }
+        };
+
+        Console.WriteLine("=== Pipeline 1 ===");
+        foreach (var request in requests)
+        {
+            var response = await pipeline1.ExecuteAsync(request);
+            Console.WriteLine($"Status: {response.StatusCode}, Body: {response.Body}");
+        }
+
+        Console.WriteLine("\n=== Pipeline 2 ===");
+        foreach (var request in requests)
+        {
+            var response = await pipeline2.ExecuteAsync(request);
+            Console.WriteLine($"Status: {response.StatusCode}, Body: {response.Body}");
+        }
+    }
+
+    static async Task<Response> ValidationHandler(Request req, Response res, Func<Task<Response>> next)
+    {
+        if (string.IsNullOrEmpty(req.Path) || string.IsNullOrEmpty(req.Method))
+        {
+            res.StatusCode = 400;
+            res.Body = "Invalid request: Path or Method missing";
+            return res;
+        }
+        return await next();
+    }
+
+    static async Task<Response> LoggingHandler(Request req, Response res, Func<Task<Response>> next)
+    {
+        Console.WriteLine($"[LOG] {DateTime.Now:HH:mm:ss} {req.Method} {req.Path}");
+        var result = await next();
+        Console.WriteLine($"[LOG] Response: {result.StatusCode}");
+        return result;
+    }
+
+    static async Task<Response> AuthenticationHandler(Request req, Response res, Func<Task<Response>> next)
+    {
+        if (req.Token != "valid_token")
+        {
+            res.StatusCode = 401;
+            res.Body = "Unauthorized: Invalid token";
+            return res;
+        }
+        req.User = "authenticated_user";
+        return await next();
+    }
+
+    static async Task<Response> AuthorizationHandler(Request req, Response res, Func<Task<Response>> next)
+    {
+        if (req.Path.Contains("admin") && req.Role != "admin")
+        {
+            res.StatusCode = 403;
+            res.Body = "Forbidden: Admin access required";
+            return res;
+        }
+        return await next();
+    }
+
+    static async Task<Response> RateLimitHandler(Request req, Response res, Func<Task<Response>> next)
+    {
+        _requestCount++;
+        if (_requestCount > 3)
+        {
+            res.StatusCode = 429;
+            res.Body = "Too many requests";
+            return res;
+        }
+        return await next();
+    }
+
+    static async Task<Response> CacheHandler(Request req, Response res, Func<Task<Response>> next)
+    {
+        var cacheKey = $"{req.Method}:{req.Path}";
+        if (req.Method == "GET" && _cache.ContainsKey(cacheKey))
+        {
+            return _cache[cacheKey];
+        }
+
+        var result = await next();
+        
+        if (req.Method == "GET" && result.StatusCode == 200)
+        {
+            _cache[cacheKey] = result;
+        }
+        
+        return result;
+    }
+
+    static async Task<Response> ProcessingHandler(Request req, Response res, Func<Task<Response>> next)
+    {
+        await Task.Delay(100);
+        res.StatusCode = 200;
+        res.Body = $"Processed: {req.Path} at {DateTime.Now:HH:mm:ss}";
+        res.Headers["Processed-By"] = "RequestPipeline";
+        return res;
+    }
+}
