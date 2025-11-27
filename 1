@@ -1,0 +1,187 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+public interface IEvent
+{
+    bool IsHandled { get; set; }
+}
+
+public class EventBus
+{
+    private readonly Dictionary<Type, List<(Delegate handler, int priority)>> _handlers = new();
+    private readonly object _lock = new object();
+
+    public void Subscribe<TEvent>(Action<TEvent> handler, int priority = 0) where TEvent : IEvent
+    {
+        lock (_lock)
+        {
+            var eventType = typeof(TEvent);
+            if (!_handlers.ContainsKey(eventType))
+                _handlers[eventType] = new List<(Delegate, int)>();
+            
+            _handlers[eventType].Add((handler, priority));
+            _handlers[eventType] = _handlers[eventType].OrderByDescending(x => x.priority).ToList();
+        }
+    }
+
+    public async Task SubscribeAsync<TEvent>(Func<TEvent, Task> handler, int priority = 0) where TEvent : IEvent
+    {
+        lock (_lock)
+        {
+            var eventType = typeof(TEvent);
+            if (!_handlers.ContainsKey(eventType))
+                _handlers[eventType] = new List<(Delegate, int)>();
+            
+            _handlers[eventType].Add((handler, priority));
+            _handlers[eventType] = _handlers[eventType].OrderByDescending(x => x.priority).ToList();
+        }
+    }
+
+    public void Unsubscribe<TEvent>(Action<TEvent> handler) where TEvent : IEvent
+    {
+        lock (_lock)
+        {
+            var eventType = typeof(TEvent);
+            if (_handlers.ContainsKey(eventType))
+            {
+                _handlers[eventType].RemoveAll(x => x.handler == (Delegate)handler);
+            }
+        }
+    }
+
+    public void Publish<TEvent>(TEvent eventData) where TEvent : IEvent
+    {
+        List<(Delegate handler, int priority)> handlers;
+        lock (_lock)
+        {
+            var eventType = typeof(TEvent);
+            if (!_handlers.ContainsKey(eventType)) return;
+            handlers = new List<(Delegate, int)>(_handlers[eventType]);
+        }
+
+        foreach (var (handler, _) in handlers)
+        {
+            if (eventData.IsHandled) break;
+            ((Action<TEvent>)handler)(eventData);
+        }
+    }
+
+    public async Task PublishAsync<TEvent>(TEvent eventData) where TEvent : IEvent
+    {
+        List<(Delegate handler, int priority)> handlers;
+        lock (_lock)
+        {
+            var eventType = typeof(TEvent);
+            if (!_handlers.ContainsKey(eventType)) return;
+            handlers = new List<(Delegate, int)>(_handlers[eventType]);
+        }
+
+        foreach (var (handler, _) in handlers)
+        {
+            if (eventData.IsHandled) break;
+            if (handler is Func<TEvent, Task> asyncHandler)
+                await asyncHandler(eventData);
+            else
+                ((Action<TEvent>)handler)(eventData);
+        }
+    }
+}
+
+public class UserLoginEvent : IEvent 
+{ 
+    public string Username { get; set; } 
+    public bool IsHandled { get; set; }
+}
+
+public class OrderCreatedEvent : IEvent 
+{ 
+    public int OrderId { get; set; } 
+    public bool IsHandled { get; set; }
+}
+
+public class PaymentProcessedEvent : IEvent 
+{ 
+    public decimal Amount { get; set; } 
+    public bool IsHandled { get; set; }
+}
+
+public class ErrorEvent : IEvent 
+{ 
+    public string Message { get; set; } 
+    public bool IsHandled { get; set; }
+}
+
+public class NotificationEvent : IEvent 
+{ 
+    public string Text { get; set; } 
+    public bool IsHandled { get; set; }
+}
+
+class Program
+{
+    static async Task Main()
+    {
+        var eventBus = new EventBus();
+        var random = new Random();
+
+        for (int i = 1; i <= 20; i++)
+        {
+            var priority = random.Next(1, 10);
+            switch (i % 5)
+            {
+                case 0: 
+                    eventBus.Subscribe<UserLoginEvent>(e => {
+                        Console.WriteLine($"Login handled: {e.Username} (Priority: {priority})");
+                        if (e.Username == "admin") e.IsHandled = true;
+                    }, priority); 
+                    break;
+                case 1: 
+                    eventBus.Subscribe<OrderCreatedEvent>(e => 
+                        Console.WriteLine($"Order created: {e.OrderId} (Priority: {priority})"), priority); 
+                    break;
+                case 2: 
+                    await eventBus.SubscribeAsync<PaymentProcessedEvent>(async e => {
+                        Console.WriteLine($"Payment processing: {e.Amount} (Priority: {priority})");
+                        await Task.Delay(100);
+                    }, priority); 
+                    break;
+                case 3: 
+                    eventBus.Subscribe<ErrorEvent>(e => {
+                        Console.WriteLine($"Error: {e.Message} (Priority: {priority})");
+                        e.IsHandled = true;
+                    }, priority); 
+                    break;
+                case 4: 
+                    eventBus.Subscribe<NotificationEvent>(e => 
+                        Console.WriteLine($"Notify: {e.Text} (Priority: {priority})"), priority); 
+                    break;
+            }
+        }
+
+        for (int i = 0; i < 100; i++)
+        {
+            switch (random.Next(0, 5))
+            {
+                case 0: 
+                    eventBus.Publish(new UserLoginEvent { Username = i % 10 == 0 ? "admin" : $"user{i}" }); 
+                    break;
+                case 1: 
+                    eventBus.Publish(new OrderCreatedEvent { OrderId = i }); 
+                    break;
+                case 2: 
+                    await eventBus.PublishAsync(new PaymentProcessedEvent { Amount = random.Next(100, 1000) }); 
+                    break;
+                case 3: 
+                    eventBus.Publish(new ErrorEvent { Message = $"Error #{i}" }); 
+                    break;
+                case 4: 
+                    eventBus.Publish(new NotificationEvent { Text = $"Notification #{i}" }); 
+                    break;
+            }
+            
+            await Task.Delay(10);
+        }
+    }
+}
